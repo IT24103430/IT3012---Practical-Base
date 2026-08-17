@@ -1,5 +1,7 @@
 # agent.py
 import random
+from collections import deque
+import heapq
 
 
 class GreedyGridAgent:
@@ -98,3 +100,181 @@ class ModelBasedAgent:
         self.action_history.append(action)
         return action
 # ===== END ADDED (Step 1.3) =====
+
+
+class SearchAgent:
+    """Find paths through a grid using uninformed graph-search algorithms."""
+
+    _MOVES = (
+        ('Up', (0, 1)),
+        ('Down', (0, -1)),
+        ('Left', (-1, 0)),
+        ('Right', (1, 0)),
+    )
+
+    def __init__(self):
+        self.plan = []
+        self.active_algo = 'BFS'
+        # The environment starts every agent at (0, 0). Because the percept
+        # does not expose agent_pos, track it as planned actions are executed.
+        self.current_pos = (0, 0)
+
+    def sense_and_act(self, percept: dict) -> str:
+        """Create an offline plan when needed and execute one action from it."""
+        # Remain compatible with environments that do expose the position.
+        if percept.get('agent_pos') is not None:
+            self.current_pos = tuple(percept['agent_pos'])
+
+        if not self.plan:
+            food_positions = [tuple(food) for food in percept['all_food']]
+            if not food_positions:
+                return 'Suck'
+
+            # Manhattan distance identifies the closest pellet on the grid.
+            goal = min(
+                food_positions,
+                key=lambda food: (
+                    abs(food[0] - self.current_pos[0])
+                    + abs(food[1] - self.current_pos[1])
+                )
+            )
+
+            search_methods = {
+                'BFS': self.bfs_search,
+                'DFS': self.dfs_search,
+                'UCS': self.ucs_search,
+            }
+            algorithm = self.active_algo.upper()
+            if algorithm not in search_methods:
+                raise ValueError(
+                    "active_algo must be 'BFS', 'DFS', or 'UCS'"
+                )
+
+            self.plan = search_methods[algorithm](
+                self.current_pos,
+                goal,
+                percept['walls'],
+                percept['grid_size']
+            ) or []
+
+            # If the closest pellet is unreachable, try the remaining pellets
+            # in distance order instead of failing with an empty-plan pop.
+            if not self.plan and goal != self.current_pos:
+                other_food = sorted(
+                    (food for food in food_positions if food != goal),
+                    key=lambda food: (
+                        abs(food[0] - self.current_pos[0])
+                        + abs(food[1] - self.current_pos[1])
+                    )
+                )
+                for alternate_goal in other_food:
+                    self.plan = search_methods[algorithm](
+                        self.current_pos,
+                        alternate_goal,
+                        percept['walls'],
+                        percept['grid_size']
+                    ) or []
+                    if self.plan:
+                        break
+
+        if not self.plan:
+            return 'Suck'
+
+        # Predict the next position so the following planning cycle starts
+        # from the state reached by this action.
+        action = self.plan[0]
+        move = dict(self._MOVES)[action]
+        self.current_pos = (
+            self.current_pos[0] + move[0],
+            self.current_pos[1] + move[1]
+        )
+        return self.plan.pop(0)
+
+    def _successors(self, state, walls, grid_size):
+        """Yield valid neighbouring states and the actions that reach them."""
+        width, height = grid_size
+        x, y = state
+
+        for action, (dx, dy) in self._MOVES:
+            next_state = (x + dx, y + dy)
+            if (0 <= next_state[0] < width
+                    and 0 <= next_state[1] < height
+                    and next_state not in walls):
+                yield next_state, action
+
+    def bfs_search(self, start_pos, goal_pos, walls, grid_size):
+        """Return a shortest action path using a FIFO frontier."""
+        start = tuple(start_pos)
+        goal = tuple(goal_pos)
+        wall_set = set(map(tuple, walls))
+
+        frontier = deque([(start, [])])
+        reached = {start}
+
+        while frontier:
+            state, path = frontier.popleft()
+            if state == goal:
+                return path
+
+            for next_state, action in self._successors(
+                    state, wall_set, grid_size):
+                if next_state not in reached:
+                    reached.add(next_state)
+                    frontier.append((next_state, path + [action]))
+
+        return None
+
+    def dfs_search(self, start_pos, goal_pos, walls, grid_size):
+        """Return an action path using a LIFO frontier."""
+        start = tuple(start_pos)
+        goal = tuple(goal_pos)
+        wall_set = set(map(tuple, walls))
+
+        frontier = [(start, [])]
+        reached = {start}
+
+        while frontier:
+            state, path = frontier.pop()
+            if state == goal:
+                return path
+
+            for next_state, action in self._successors(
+                    state, wall_set, grid_size):
+                if next_state not in reached:
+                    reached.add(next_state)
+                    frontier.append((next_state, path + [action]))
+
+        return None
+
+    def ucs_search(self, start_pos, goal_pos, walls, grid_size):
+        """Return a least-cost action path using a priority queue."""
+        start = tuple(start_pos)
+        goal = tuple(goal_pos)
+        wall_set = set(map(tuple, walls))
+
+        # Every grid movement costs 1, but the frontier explicitly tracks
+        # g(n), allowing UCS to expand the currently cheapest path first.
+        frontier = [(0, start, [])]
+        reached = {start: 0}
+
+        while frontier:
+            path_cost, state, path = heapq.heappop(frontier)
+
+            # Ignore stale entries superseded by a cheaper route.
+            if path_cost != reached[state]:
+                continue
+            if state == goal:
+                return path
+
+            for next_state, action in self._successors(
+                    state, wall_set, grid_size):
+                new_cost = path_cost + 1
+                if (next_state not in reached
+                        or new_cost < reached[next_state]):
+                    reached[next_state] = new_cost
+                    heapq.heappush(
+                        frontier,
+                        (new_cost, next_state, path + [action])
+                    )
+
+        return None
